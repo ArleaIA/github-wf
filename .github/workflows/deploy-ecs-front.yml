@@ -1,0 +1,86 @@
+name: "Reusable - Deploy to ECS (Front)"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      app_name:
+        description: 'Prefijo del servicio, ej: kalai-front'
+        required: true
+        type: string
+    secrets:
+      AWS_REGION:
+        required: true
+      ECS_CLUSTER:
+        required: true
+      AWS_ROLE_ARN_INFRA:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      region: ${{ secrets.AWS_REGION }}
+      ecr_repo: ${{ inputs.app_name }}-${{ inputs.environment }}
+      cluster: ${{ secrets.ECS_CLUSTER }}
+      service: ${{ inputs.app_name }}-${{ inputs.environment }}
+      role_arn: ${{ secrets.AWS_ROLE_ARN_INFRA }}
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.role_arn }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          output-env-credentials: true
+
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Fetch build config from SSM
+        run: |
+          ENV=${{ inputs.environment }}
+          API_URL=$(aws ssm get-parameter \
+            --name "/front/$ENV/API_URL" \
+            --query "Parameter.Value" \
+            --output text \
+            --region ${{ env.region }})
+          APP_URL=$(aws ssm get-parameter \
+            --name "/front/$ENV/APP_URL" \
+            --query "Parameter.Value" \
+            --output text \
+            --region ${{ env.region }})
+          echo "API_URL=$API_URL" >> $GITHUB_ENV
+          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
+
+      - name: Build, Tag, and Push image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ecr_repo }}
+          IMAGE_TAG: ${{ github.run_id }}-${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg API_URL=${{ env.API_URL }} \
+            --build-arg APP_URL=${{ env.APP_URL }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Update ECS Service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.cluster }} \
+            --service ${{ env.service }} \
+            --force-new-deployment \
+            --region ${{ env.region }}
