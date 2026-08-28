@@ -24,6 +24,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-front-${{ inputs.environment }}
+      cancel-in-progress: false
     env:
       region: ${{ secrets.AWS_REGION }}
       role_arn: ${{ secrets.AWS_ROLE_ARN_INFRA }}
@@ -68,25 +71,15 @@ jobs:
 
       - name: Sync to S3
         run: |
+          # Sync all files except index.html with immutable cache
           aws s3 sync dist/front-kalai/browser/ s3://${{ secrets.S3_BUCKET }} \
             --delete \
-            --region ${{ env.region }}
-
-      - name: Set cache headers for assets
-        run: |
-          # Hashed assets get long cache
-          aws s3 cp s3://${{ secrets.S3_BUCKET }}/ s3://${{ secrets.S3_BUCKET }}/ \
-            --recursive \
-            --exclude "*" \
-            --include "*.js" \
-            --include "*.css" \
-            --metadata-directive REPLACE \
+            --exclude "index.html" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
 
-          # index.html must not be cached
-          aws s3 cp s3://${{ secrets.S3_BUCKET }}/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
-            --metadata-directive REPLACE \
+          # Sync index.html with no-cache
+          aws s3 cp dist/front-kalai/browser/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
             --cache-control "no-cache" \
             --content-type "text/html" \
             --region ${{ env.region }}
@@ -99,9 +92,3 @@ jobs:
             --query 'Invalidation.Id' \
             --output text)
           echo "CloudFront Invalidation ID: $INVALIDATION_ID"
-
-          # Wait for invalidation to complete
-          aws cloudfront wait invalidation-completed \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --id "$INVALIDATION_ID"
-          echo "CloudFront invalidation completed"
