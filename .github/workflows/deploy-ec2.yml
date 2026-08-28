@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  build-and-push:
+  deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     env:
@@ -66,8 +66,13 @@ jobs:
           INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          SERVICE: ${{ inputs.service }}
         run: |
-          SERVICE="${{ inputs.service }}"
+          if [[ ! "$SERVICE" =~ ^(worker|scrapper|all)$ ]]; then
+            echo "::error::Invalid service '$SERVICE'. Must be worker, scrapper, or all."
+            exit 1
+          fi
+
           COMPOSE_ARGS=""
           if [ "$SERVICE" != "all" ]; then
             COMPOSE_ARGS="$SERVICE"
@@ -78,6 +83,7 @@ jobs:
             --arg registry "$ECR_REGISTRY" \
             --arg compose_args "$COMPOSE_ARGS" \
             '{commands: [
+              "set -euo pipefail",
               "cd /opt/arlea/deploy",
               ("aws ecr get-login-password --region " + $region + " | docker login --username AWS --password-stdin " + $registry),
               ("docker compose pull " + $compose_args),
@@ -89,6 +95,8 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters "$PARAMS" \
+            --timeout-seconds 300 \
+            --comment "Deploy $SERVICE from ${{ github.sha }}" \
             --region "$AWS_REGION" \
             --output text \
             --query 'Command.CommandId')
@@ -105,7 +113,7 @@ jobs:
               --output text 2>/dev/null) || true
 
             case "$STATUS" in
-              Success|Failed|TimedOut|Cancelled|Cancelling)
+              Success|Failed|TimedOut|Cancelled)
                 break
                 ;;
             esac
@@ -113,6 +121,12 @@ jobs:
             echo "Waiting for SSM command to complete... (attempt $i, status: ${STATUS:-Pending})"
             sleep 10
           done
+
+          # Detect polling timeout (loop exhausted without reaching a terminal state)
+          if [ "$STATUS" != "Success" ] && [ "$STATUS" != "Failed" ] && [ "$STATUS" != "Cancelled" ] && [ "$STATUS" != "TimedOut" ]; then
+            echo "::error::SSM command timed out after 10 minutes (still in status: $STATUS)"
+            exit 1
+          fi
 
           # Retrieve full command output
           RESULT=$(aws ssm get-command-invocation \
