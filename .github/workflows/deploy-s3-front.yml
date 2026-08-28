@@ -1,0 +1,94 @@
+name: "Reusable - Deploy Front to S3 + CloudFront"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+    secrets:
+      AWS_REGION:
+        required: true
+      AWS_ROLE_ARN_INFRA:
+        required: true
+      S3_BUCKET:
+        required: true
+      CLOUDFRONT_DISTRIBUTION_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-front-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      region: ${{ secrets.AWS_REGION }}
+      role_arn: ${{ secrets.AWS_ROLE_ARN_INFRA }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.role_arn }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          output-env-credentials: true
+
+      - name: Fetch build config from SSM
+        run: |
+          ENV=${{ inputs.environment }}
+          API_URL=$(aws ssm get-parameter \
+            --name "/front/$ENV/API_URL" \
+            --query "Parameter.Value" \
+            --output text \
+            --region ${{ env.region }})
+          APP_URL=$(aws ssm get-parameter \
+            --name "/front/$ENV/APP_URL" \
+            --query "Parameter.Value" \
+            --output text \
+            --region ${{ env.region }})
+          echo "API_URL=$API_URL" >> $GITHUB_ENV
+          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
+
+      - name: Build Angular app
+        run: npm run build
+
+      - name: Sync to S3
+        run: |
+          # Sync all files except index.html with immutable cache
+          aws s3 sync dist/front-kalai/browser/ s3://${{ secrets.S3_BUCKET }} \
+            --delete \
+            --exclude "index.html" \
+            --cache-control "max-age=31536000,immutable" \
+            --region ${{ env.region }}
+
+          # Sync index.html with no-cache
+          aws s3 cp dist/front-kalai/browser/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
+            --cache-control "no-cache" \
+            --content-type "text/html" \
+            --region ${{ env.region }}
+
+      - name: Invalidate CloudFront cache
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "CloudFront Invalidation ID: $INVALIDATION_ID"
