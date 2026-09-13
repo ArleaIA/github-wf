@@ -86,8 +86,10 @@ jobs:
               "set -euo pipefail",
               "cd /opt/arlea/deploy",
               ("aws ecr get-login-password --region " + $region + " | docker login --username AWS --password-stdin " + $registry),
+              "docker image prune -af || true",
               ("docker compose pull " + $compose_args),
               ("docker compose up -d --force-recreate " + $compose_args),
+              "docker image prune -af || true",
               "docker compose ps"
             ]}')
 
