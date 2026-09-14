@@ -71,18 +71,54 @@ jobs:
 
       - name: Sync to S3
         run: |
-          # Sync all files except index.html with immutable cache
-          aws s3 sync dist/front-kalai/browser/ s3://${{ secrets.S3_BUCKET }} \
+          DIST=dist/front-kalai/browser
+
+          # Sync hashed assets with immutable cache.
+          # Exclude non-hashed PWA files (index.html, service worker and manifest):
+          # they must always revalidate so CloudFront never serves a stale
+          # service worker / manifest that would pin users to an old PWA version.
+          aws s3 sync "$DIST" s3://${{ secrets.S3_BUCKET }} \
             --delete \
             --exclude "index.html" \
+            --exclude "ngsw-worker.js" \
+            --exclude "ngsw.json" \
+            --exclude "safety-worker.js" \
+            --exclude "manifest.webmanifest" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
 
           # Sync index.html with no-cache
-          aws s3 cp dist/front-kalai/browser/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
+          aws s3 cp "$DIST/index.html" s3://${{ secrets.S3_BUCKET }}/index.html \
             --cache-control "no-cache" \
             --content-type "text/html" \
             --region ${{ env.region }}
+
+          # Sync non-hashed PWA files with no-cache so updates propagate.
+          # Each file may be absent depending on the build, so guard with -f.
+          if [ -f "$DIST/ngsw-worker.js" ]; then
+            aws s3 cp "$DIST/ngsw-worker.js" s3://${{ secrets.S3_BUCKET }}/ngsw-worker.js \
+              --cache-control "no-cache" \
+              --content-type "application/javascript" \
+              --region ${{ env.region }}
+          fi
+          if [ -f "$DIST/safety-worker.js" ]; then
+            aws s3 cp "$DIST/safety-worker.js" s3://${{ secrets.S3_BUCKET }}/safety-worker.js \
+              --cache-control "no-cache" \
+              --content-type "application/javascript" \
+              --region ${{ env.region }}
+          fi
+          if [ -f "$DIST/ngsw.json" ]; then
+            aws s3 cp "$DIST/ngsw.json" s3://${{ secrets.S3_BUCKET }}/ngsw.json \
+              --cache-control "no-cache" \
+              --content-type "application/json" \
+              --region ${{ env.region }}
+          fi
+          if [ -f "$DIST/manifest.webmanifest" ]; then
+            aws s3 cp "$DIST/manifest.webmanifest" s3://${{ secrets.S3_BUCKET }}/manifest.webmanifest \
+              --cache-control "no-cache" \
+              --content-type "application/manifest+json" \
+              --region ${{ env.region }}
+          fi
 
       - name: Invalidate CloudFront cache
         run: |
