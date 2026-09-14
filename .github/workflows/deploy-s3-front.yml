@@ -95,30 +95,22 @@ jobs:
 
           # Sync non-hashed PWA files with no-cache so updates propagate.
           # Each file may be absent depending on the build, so guard with -f.
-          if [ -f "$DIST/ngsw-worker.js" ]; then
-            aws s3 cp "$DIST/ngsw-worker.js" s3://${{ secrets.S3_BUCKET }}/ngsw-worker.js \
-              --cache-control "no-cache" \
-              --content-type "application/javascript" \
-              --region ${{ env.region }}
-          fi
-          if [ -f "$DIST/safety-worker.js" ]; then
-            aws s3 cp "$DIST/safety-worker.js" s3://${{ secrets.S3_BUCKET }}/safety-worker.js \
-              --cache-control "no-cache" \
-              --content-type "application/javascript" \
-              --region ${{ env.region }}
-          fi
-          if [ -f "$DIST/ngsw.json" ]; then
-            aws s3 cp "$DIST/ngsw.json" s3://${{ secrets.S3_BUCKET }}/ngsw.json \
-              --cache-control "no-cache" \
-              --content-type "application/json" \
-              --region ${{ env.region }}
-          fi
-          if [ -f "$DIST/manifest.webmanifest" ]; then
-            aws s3 cp "$DIST/manifest.webmanifest" s3://${{ secrets.S3_BUCKET }}/manifest.webmanifest \
-              --cache-control "no-cache" \
-              --content-type "application/manifest+json" \
-              --region ${{ env.region }}
-          fi
+          PWA_FILES=(
+            "ngsw-worker.js:application/javascript"
+            "safety-worker.js:application/javascript"
+            "ngsw.json:application/json"
+            "manifest.webmanifest:application/manifest+json"
+          )
+          for entry in "${PWA_FILES[@]}"; do
+            file="${entry%%:*}"
+            content_type="${entry#*:}"
+            if [ -f "$DIST/$file" ]; then
+              aws s3 cp "$DIST/$file" "s3://${{ secrets.S3_BUCKET }}/$file" \
+                --cache-control "no-cache" \
+                --content-type "$content_type" \
+                --region ${{ env.region }}
+            fi
+          done
 
       - name: Invalidate CloudFront cache
         run: |
