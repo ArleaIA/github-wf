@@ -71,18 +71,46 @@ jobs:
 
       - name: Sync to S3
         run: |
-          # Sync all files except index.html with immutable cache
-          aws s3 sync dist/front-kalai/browser/ s3://${{ secrets.S3_BUCKET }} \
+          DIST=dist/front-kalai/browser
+
+          # Sync hashed assets with immutable cache.
+          # Exclude non-hashed PWA files (index.html, service worker and manifest):
+          # they must always revalidate so CloudFront never serves a stale
+          # service worker / manifest that would pin users to an old PWA version.
+          aws s3 sync "$DIST" s3://${{ secrets.S3_BUCKET }} \
             --delete \
             --exclude "index.html" \
+            --exclude "ngsw-worker.js" \
+            --exclude "ngsw.json" \
+            --exclude "safety-worker.js" \
+            --exclude "manifest.webmanifest" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
 
           # Sync index.html with no-cache
-          aws s3 cp dist/front-kalai/browser/index.html s3://${{ secrets.S3_BUCKET }}/index.html \
+          aws s3 cp "$DIST/index.html" s3://${{ secrets.S3_BUCKET }}/index.html \
             --cache-control "no-cache" \
             --content-type "text/html" \
             --region ${{ env.region }}
+
+          # Sync non-hashed PWA files with no-cache so updates propagate.
+          # Each file may be absent depending on the build, so guard with -f.
+          PWA_FILES=(
+            "ngsw-worker.js:application/javascript"
+            "safety-worker.js:application/javascript"
+            "ngsw.json:application/json"
+            "manifest.webmanifest:application/manifest+json"
+          )
+          for entry in "${PWA_FILES[@]}"; do
+            file="${entry%%:*}"
+            content_type="${entry#*:}"
+            if [ -f "$DIST/$file" ]; then
+              aws s3 cp "$DIST/$file" "s3://${{ secrets.S3_BUCKET }}/$file" \
+                --cache-control "no-cache" \
+                --content-type "$content_type" \
+                --region ${{ env.region }}
+            fi
+          done
 
       - name: Invalidate CloudFront cache
         run: |
