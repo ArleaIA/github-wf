@@ -73,10 +73,24 @@ jobs:
         run: |
           DIST=dist/front-kalai/browser
 
+          # Contrato del asset de media (video hero + poster, E27 T09):
+          #   - Vive en arlea-front/public/media/ y el build de Angular copia
+          #     public/ a la raiz del dist, por lo que sale como /media/ (NO
+          #     /assets/).
+          #   - Se sirve desde /media/ a proposito para NO caer en el glob del
+          #     service worker de ngsw (/assets/**), que cachearia el video de
+          #     varios MB. Por eso /media/ NO recibe Cache-Control "no-cache" ni
+          #     "immutable": es media pesada y semi-estable -> cache media/larga
+          #     (7 dias). El video es same-origin (bucket propio via CloudFront),
+          #     asi que si CloudFront aplica una CSP restrictiva por default-src
+          #     basta con media-src 'self'.
+
           # Sync hashed assets with immutable cache.
           # Exclude non-hashed PWA files (index.html, service worker and manifest):
           # they must always revalidate so CloudFront never serves a stale
           # service worker / manifest that would pin users to an old PWA version.
+          # Exclude media/* so el video hero no herede el cache immutable ni el
+          # --delete de esta pasada (se sincroniza aparte mas abajo).
           aws s3 sync "$DIST" s3://${{ secrets.S3_BUCKET }} \
             --delete \
             --exclude "index.html" \
@@ -84,8 +98,54 @@ jobs:
             --exclude "ngsw.json" \
             --exclude "safety-worker.js" \
             --exclude "manifest.webmanifest" \
+            --exclude "media/*" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
+
+          # Sync /media/ (video hero + poster) con cache media/larga (7 dias),
+          # NO immutable (el asset puede reemplazarse) y NO no-cache.
+          if [ -d "$DIST/media" ]; then
+            # 1) Sube y poda objetos obsoletos (--delete acotado al prefijo
+            #    /media). Fija cache-control; el content-type lo INFIERE el CLI
+            #    via la tabla mimetypes de Python (se corrige explicito abajo).
+            aws s3 sync "$DIST/media" s3://${{ secrets.S3_BUCKET }}/media \
+              --delete \
+              --cache-control "public,max-age=604800" \
+              --region ${{ env.region }}
+
+            # 2) Fija Content-Type EXPLICITO por extension. El sync lo infiere y
+            #    puede fallar en formatos que la tabla mimetypes del runner no
+            #    cubre (.webp/.avif/.webm -> application/octet-stream), lo que
+            #    fuerza descarga en vez de render/reproduccion inline. Se hace
+            #    con una copia server-side in-place (--metadata-directive
+            #    REPLACE): NO re-baja ni re-sube el video de varios MB, solo
+            #    reescribe metadata. Recorre recursivo (cubre subcarpetas si
+            #    algun dia /media/ deja de ser plano). Reafirma cache-control
+            #    porque REPLACE descarta la metadata previa del objeto.
+            while IFS= read -r -d '' f; do
+              rel="${f#"$DIST/media/"}"
+              ext="${rel##*.}"
+              case "$ext" in
+                mp4)       ct="video/mp4" ;;
+                webm)      ct="video/webm" ;;
+                mov)       ct="video/quicktime" ;;
+                jpg|jpeg)  ct="image/jpeg" ;;
+                png)       ct="image/png" ;;
+                webp)      ct="image/webp" ;;
+                avif)      ct="image/avif" ;;
+                *)         ct="" ;;
+              esac
+              if [ -n "$ct" ]; then
+                aws s3 cp \
+                  "s3://${{ secrets.S3_BUCKET }}/media/$rel" \
+                  "s3://${{ secrets.S3_BUCKET }}/media/$rel" \
+                  --metadata-directive REPLACE \
+                  --content-type "$ct" \
+                  --cache-control "public,max-age=604800" \
+                  --region ${{ env.region }}
+              fi
+            done < <(find "$DIST/media" -type f -print0)
+          fi
 
           # Sync index.html with no-cache
           aws s3 cp "$DIST/index.html" s3://${{ secrets.S3_BUCKET }}/index.html \
