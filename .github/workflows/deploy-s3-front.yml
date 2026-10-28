@@ -69,6 +69,33 @@ jobs:
       - name: Build Angular app
         run: npm run build
 
+      # Stubs HTML por ficha para SEO (E28 · QA #18). El script nunca rompe el build y, si la
+      # API no responde, no genera nada. continue-on-error evita frenar el deploy, pero NO debe
+      # ocultar fallos: se emiten ::warning:: y el sync de stubs decide con `outcome` y conteo.
+      # Se ejecuta SIN credenciales AWS (no las necesita; solo habla con la API publica).
+      - name: Prerender fichas (SEO)
+        id: prerender
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          SITE_URL: ${{ env.APP_URL }}
+        run: |
+          set +e
+          env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+            npm run prerender --if-present
+          rc=$?
+          N=$(find dist/front-kalai/browser/producto -name '*.html' 2>/dev/null | wc -l | tr -d ' ')
+          echo "PRERENDER_COUNT=${N:-0}" >> "$GITHUB_ENV"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::Prerender termino con codigo $rc; se conservan los stubs ya publicados"
+            exit "$rc"
+          fi
+          if [ "${N:-0}" -eq 0 ]; then
+            echo "::warning::Prerender no genero stubs (API caida, plantilla inesperada o presupuesto agotado); se conservan los ya publicados"
+          else
+            echo "::notice::Prerender: ${N} stubs de fichas generados"
+          fi
+
       - name: Sync to S3
         run: |
           DIST=dist/front-kalai/browser
@@ -99,6 +126,7 @@ jobs:
             --exclude "safety-worker.js" \
             --exclude "manifest.webmanifest" \
             --exclude "media/*" \
+            --exclude "producto/*" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
 
@@ -145,6 +173,44 @@ jobs:
                   --region ${{ env.region }}
               fi
             done < <(find "$DIST/media" -type f -print0)
+          fi
+
+          # Stubs prerenderizados de fichas (/producto/<id>.html): contenido SIN hash que cambia
+          # con el catalogo -> no-cache y Content-Type html explicito.
+          # Politica de borrado (evita vaciar el SEO por un prerender incompleto): --delete SOLO si
+          # el paso de prerender termino OK (outcome=success) Y genero >= 80% de los stubs hoy
+          # publicados (piso absoluto 100). En cualquier otro caso se sube sin --delete (los stubs
+          # viejos quedan) y se avisa con ::warning::. Sin archivos generados no se toca nada.
+          # PRERENDER_COUNT sin definir = el paso no llego a escribirlo (timeout de 10 min o cancelado).
+          if [ -z "${PRERENDER_COUNT+x}" ]; then
+            echo "::warning::El prerender no termino (timeout de 10 min o cancelado): PRERENDER_COUNT sin definir; no se publican ni borran stubs"
+          fi
+          N="${PRERENDER_COUNT:-0}"
+          if [ -d "$DIST/producto" ] && [ "$N" -gt 0 ]; then
+            DELETE_FLAG=""
+            # Conteo de stubs publicados con s3api (distingue "prefijo vacio" de "error de acceso/red"):
+            # si el listado FALLA no se sabe cuantos hay -> NO se usa --delete.
+            if LISTADO=$(aws s3api list-objects-v2 --bucket "${{ secrets.S3_BUCKET }}" --prefix producto/ \
+                --query 'Contents[].Key' --output text --region ${{ env.region }} 2>/tmp/s3-ls.err); then
+              EXISTENTES=$(printf '%s\n' "$LISTADO" | tr '\t' '\n' | grep -c '\.html$' || true)
+              MIN=$(( ${EXISTENTES:-0} * 80 / 100 ))
+              [ "$MIN" -lt 100 ] && MIN=100
+              if [ "${{ steps.prerender.outcome }}" = "success" ] && [ "$N" -ge "$MIN" ]; then
+                DELETE_FLAG="--delete"
+              else
+                echo "::warning::Stubs de fichas subidos SIN --delete (outcome=${{ steps.prerender.outcome }}, generados=$N, minimo=$MIN, publicados=${EXISTENTES:-0})"
+              fi
+            else
+              echo "::warning::No se pudo listar producto/ en S3 ($(head -c 200 /tmp/s3-ls.err)); stubs subidos SIN --delete"
+            fi
+            aws s3 sync "$DIST/producto" s3://${{ secrets.S3_BUCKET }}/producto \
+              $DELETE_FLAG \
+              --exclude "*" --include "*.html" \
+              --cache-control "no-cache" \
+              --content-type "text/html; charset=utf-8" \
+              --region ${{ env.region }}
+          else
+            echo "::warning::Sin stubs de fichas que publicar (generados=$N); se conservan los existentes"
           fi
 
           # Sync index.html with no-cache
