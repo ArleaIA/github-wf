@@ -69,6 +69,15 @@ jobs:
       - name: Build Angular app
         run: npm run build
 
+      # Stubs HTML por ficha para SEO (E28 · QA #18). Falla segura: el script nunca
+      # rompe el build y, si la API no responde, no genera nada (continue-on-error por
+      # si Node/red fallan). Escribe dist/front-kalai/browser/producto/<id>.html.
+      - name: Prerender fichas (SEO)
+        continue-on-error: true
+        env:
+          SITE_URL: ${{ env.APP_URL }}
+        run: npm run prerender --if-present
+
       - name: Sync to S3
         run: |
           DIST=dist/front-kalai/browser
@@ -99,6 +108,7 @@ jobs:
             --exclude "safety-worker.js" \
             --exclude "manifest.webmanifest" \
             --exclude "media/*" \
+            --exclude "producto/*" \
             --cache-control "max-age=31536000,immutable" \
             --region ${{ env.region }}
 
@@ -145,6 +155,19 @@ jobs:
                   --region ${{ env.region }}
               fi
             done < <(find "$DIST/media" -type f -print0)
+          fi
+
+          # Stubs prerenderizados de fichas (/producto/<id>.html): contenido SIN hash que cambia
+          # con el catalogo -> no-cache y Content-Type html explicito. --delete acotado al
+          # prefijo producto/ (poda stubs de productos que salen del top) y SOLO si el
+          # prerender genero archivos: si no hay carpeta, no se toca lo ya publicado.
+          if [ -d "$DIST/producto" ] && [ -n "$(ls -A "$DIST/producto" 2>/dev/null)" ]; then
+            aws s3 sync "$DIST/producto" s3://${{ secrets.S3_BUCKET }}/producto \
+              --delete \
+              --exclude "*" --include "*.html" \
+              --cache-control "no-cache" \
+              --content-type "text/html; charset=utf-8" \
+              --region ${{ env.region }}
           fi
 
           # Sync index.html with no-cache
