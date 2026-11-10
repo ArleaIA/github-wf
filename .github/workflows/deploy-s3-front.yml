@@ -6,6 +6,11 @@ on:
       environment:
         required: true
         type: string
+      sitemap_min_urls:
+        description: "Umbral minimo de URLs (<loc>) del sitemap; si hay menos el job falla"
+        required: false
+        type: number
+        default: 1500
     secrets:
       AWS_REGION:
         required: true
@@ -96,6 +101,38 @@ jobs:
             echo "::notice::Prerender: ${N} stubs de fichas generados"
           fi
 
+      # Sitemap (E28-R2 T23 · QA #18). Usa la misma lista top-catalogo-v1 que el prerender y,
+      # a diferencia de este, NO es tolerante a fallos: si el script falla o el sitemap tiene
+      # menos URLs que el umbral, el job se corta ANTES del sync (nunca se publica el estatico
+      # de 14 URLs). `public/sitemap.xml` ya se copio al dist durante el build, asi que el
+      # generado se vuelve a copiar. Sin credenciales AWS; no se imprime ninguna variable.
+      - name: Generate sitemap and validate URL count
+        env:
+          SITE_URL: ${{ env.APP_URL }}
+          MIN_URLS: ${{ inputs.sitemap_min_urls }}
+        run: |
+          # MIN_URLS llega por env (nunca interpolado en el shell): entero positivo, no vacio
+          case "$MIN_URLS" in
+            ''|*[!0-9]*|0)
+              echo "::error::sitemap_min_urls invalido ('${MIN_URLS}'): debe ser un entero positivo"
+              exit 1
+              ;;
+          esac
+          env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+            npm run sitemap
+          cp public/sitemap.xml dist/front-kalai/browser/sitemap.xml
+          # grep -o cuenta cada <loc> aunque el XML venga en una sola linea
+          N=$(grep -o '<loc>' dist/front-kalai/browser/sitemap.xml | wc -l | tr -d ' ')
+          {
+            echo "### Sitemap"
+            echo "- URLs en sitemap.xml: **${N}** (minimo exigido: ${MIN_URLS})"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${N:-0}" -lt "$MIN_URLS" ]; then
+            echo "::error::Sitemap con ${N} URLs (< ${MIN_URLS}); se aborta el deploy"
+            exit 1
+          fi
+          echo "::notice::Sitemap: ${N} URLs"
+
       - name: Sync to S3
         run: |
           DIST=dist/front-kalai/browser
@@ -125,6 +162,8 @@ jobs:
             --exclude "ngsw.json" \
             --exclude "safety-worker.js" \
             --exclude "manifest.webmanifest" \
+            --exclude "sitemap.xml" \
+            --exclude "robots.txt" \
             --exclude "media/*" \
             --exclude "producto/*" \
             --cache-control "max-age=31536000,immutable" \
@@ -219,13 +258,15 @@ jobs:
             --content-type "text/html" \
             --region ${{ env.region }}
 
-          # Sync non-hashed PWA files with no-cache so updates propagate.
+          # Sync non-hashed PWA/SEO files (incl. sitemap.xml y robots.txt, que cambian por deploy) with no-cache so updates propagate.
           # Each file may be absent depending on the build, so guard with -f.
           PWA_FILES=(
             "ngsw-worker.js:application/javascript"
             "safety-worker.js:application/javascript"
             "ngsw.json:application/json"
             "manifest.webmanifest:application/manifest+json"
+            "sitemap.xml:application/xml"
+            "robots.txt:text/plain"
           )
           for entry in "${PWA_FILES[@]}"; do
             file="${entry%%:*}"
