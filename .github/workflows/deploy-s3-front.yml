@@ -84,6 +84,7 @@ jobs:
         timeout-minutes: 35
         env:
           SITE_URL: ${{ env.APP_URL }}
+          PRERENDER_BUDGET_MS: '1500000' # 25 min (el paso tiene timeout de 35); el script usa 8 min por defecto
         run: |
           set +e
           env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
