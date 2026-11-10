@@ -111,6 +111,13 @@ jobs:
           SITE_URL: ${{ env.APP_URL }}
           MIN_URLS: ${{ inputs.sitemap_min_urls }}
         run: |
+          # MIN_URLS llega por env (nunca interpolado en el shell): entero positivo, no vacio
+          case "$MIN_URLS" in
+            ''|*[!0-9]*|0)
+              echo "::error::sitemap_min_urls invalido ('${MIN_URLS}'): debe ser un entero positivo"
+              exit 1
+              ;;
+          esac
           env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
             npm run sitemap
           cp public/sitemap.xml dist/front-kalai/browser/sitemap.xml
@@ -155,6 +162,8 @@ jobs:
             --exclude "ngsw.json" \
             --exclude "safety-worker.js" \
             --exclude "manifest.webmanifest" \
+            --exclude "sitemap.xml" \
+            --exclude "robots.txt" \
             --exclude "media/*" \
             --exclude "producto/*" \
             --cache-control "max-age=31536000,immutable" \
@@ -249,13 +258,15 @@ jobs:
             --content-type "text/html" \
             --region ${{ env.region }}
 
-          # Sync non-hashed PWA files with no-cache so updates propagate.
+          # Sync non-hashed PWA/SEO files (incl. sitemap.xml y robots.txt, que cambian por deploy) with no-cache so updates propagate.
           # Each file may be absent depending on the build, so guard with -f.
           PWA_FILES=(
             "ngsw-worker.js:application/javascript"
             "safety-worker.js:application/javascript"
             "ngsw.json:application/json"
             "manifest.webmanifest:application/manifest+json"
+            "sitemap.xml:application/xml"
+            "robots.txt:text/plain"
           )
           for entry in "${PWA_FILES[@]}"; do
             file="${entry%%:*}"
