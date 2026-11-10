@@ -81,7 +81,7 @@ jobs:
       - name: Prerender fichas (SEO)
         id: prerender
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 35
         env:
           SITE_URL: ${{ env.APP_URL }}
         run: |
@@ -220,9 +220,9 @@ jobs:
           # el paso de prerender termino OK (outcome=success) Y genero >= 80% de los stubs hoy
           # publicados (piso absoluto 100). En cualquier otro caso se sube sin --delete (los stubs
           # viejos quedan) y se avisa con ::warning::. Sin archivos generados no se toca nada.
-          # PRERENDER_COUNT sin definir = el paso no llego a escribirlo (timeout de 10 min o cancelado).
+          # PRERENDER_COUNT sin definir = el paso no llego a escribirlo (timeout de 35 min o cancelado).
           if [ -z "${PRERENDER_COUNT+x}" ]; then
-            echo "::warning::El prerender no termino (timeout de 10 min o cancelado): PRERENDER_COUNT sin definir; no se publican ni borran stubs"
+            echo "::warning::El prerender no termino (timeout de 35 min o cancelado): PRERENDER_COUNT sin definir; no se publican ni borran stubs"
           fi
           N="${PRERENDER_COUNT:-0}"
           if [ -d "$DIST/producto" ] && [ "$N" -gt 0 ]; then
